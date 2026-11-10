@@ -1,6 +1,6 @@
 // src/plugin.jsx
 import React, { useEffect, useRef, useState } from "react";
-import { host, useValue } from "@hermes/plugin-sdk";
+import { TRANSCRIPT_DIRECTIVE_AREA, host, useValue } from "@hermes/plugin-sdk";
 
 // src/diff-rows.js
 function diffRows(patch) {
@@ -326,11 +326,192 @@ function FileDetail({ ctx, session, file }) {
     ] }, i)) }) : /* @__PURE__ */ jsx("div", { className: "empty", children: diff.note || "The file matches its original contents. Edit history still contains the intermediate changes." })
   ] });
 }
+var cardCss = `
+.tec{border:1px solid var(--ui-stroke-secondary,#dcdcdc);border-radius:8px;overflow:hidden;margin:6px 0 2px;max-width:100%;font:12.5px/1.55 var(--font-sans,system-ui);color:var(--ui-text-primary,#242424);background:var(--ui-surface-background,transparent)}
+.tec-head{display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--ui-stroke-secondary,#e6e6e6)}
+.tec-title{font-weight:600;font-size:12.5px}
+.tec-counts{display:flex;gap:7px;font-family:var(--font-mono,monospace);font-variant-numeric:tabular-nums}
+.tec-add{color:#2f9e44}.tec-del{color:#e03131}
+.tec-scope{margin-left:auto;display:flex;gap:2px;border:1px solid var(--ui-stroke-secondary,#dcdcdc);border-radius:6px;padding:1px}
+.tec-scope button{border:0;background:transparent;border-radius:4px;padding:2px 7px;font-size:11px;cursor:pointer;color:var(--ui-text-secondary,#666)}
+.tec-scope button[aria-pressed=true]{background:var(--ui-row-active-background,rgba(0,0,0,.08));color:var(--ui-text-primary,#242424);font-weight:600}
+.tec-files{max-height:210px;overflow:auto}
+.tec-files.has-open{max-height:480px}
+.tec-row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;background:transparent;padding:5px 10px;cursor:pointer;font:inherit;color:inherit}
+.tec-row:hover{background:var(--ui-row-hover-background,rgba(0,0,0,.04))}
+.tec-status{flex:0 0 auto;font:600 10px/16px var(--font-mono,monospace);width:16px;height:16px;text-align:center;border-radius:3px;background:var(--ui-row-active-background,rgba(0,0,0,.08));color:var(--ui-text-secondary,#666)}
+.tec-status.s-added{color:#2f9e44}.tec-status.s-deleted{color:#e03131}.tec-status.s-restored{color:#1971c2}
+.tec-name{font-family:var(--font-mono,monospace);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+.tec-dir{color:var(--ui-text-tertiary,#888);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.tec-filecounts{flex:0 0 auto;display:flex;gap:6px;font-family:var(--font-mono,monospace);font-size:11px}
+.tec-diff{margin:0;padding:4px 0 8px;max-height:320px;overflow:auto;font:11.5px/1.65 var(--font-mono,monospace);background:var(--ui-surface-background,transparent)}
+.tec-line{display:flex;min-width:max-content;white-space:pre;padding-right:12px}
+.tec-ln{flex:0 0 3.5ch;width:3.5ch;text-align:right;padding-right:1ch;color:var(--ui-text-tertiary,#999);user-select:none;font-variant-numeric:tabular-nums}
+.tec-code{padding-left:8px}
+.tec-line.add{background:color-mix(in srgb,#278344 13%,transparent)}
+.tec-line.remove{background:color-mix(in srgb,#cc3434 12%,transparent)}
+.tec-line.hunk,.tec-line.meta{color:var(--ui-text-secondary,#666);padding-left:10px}
+.tec-line.hunk{background:var(--ui-row-hover-background,rgba(0,0,0,.04))}
+.tec-note{padding:6px 10px;font-size:11px;color:var(--ui-text-secondary,#666)}
+`;
+var CARD_FILE_CAP = 20;
+function cardBasename(path) {
+  return path.split(/[\\/]/).pop() || path;
+}
+function cardDirname(path) {
+  const name = cardBasename(path);
+  return path.slice(0, Math.max(0, path.length - name.length));
+}
+function cardStatus(status) {
+  return status === "added" ? "A" : status === "deleted" ? "D" : status === "restored" ? "R" : "M";
+}
+var cardMemory = /* @__PURE__ */ new Map();
+function EditsCard({ ctx, sessionId }) {
+  const focused = useValue(host.state.focusedStoredSessionId || host.state.activeSessionId);
+  const runtime = useValue(host.state.focusedSessionId || host.state.activeSessionId);
+  const resolvedRef = useRef("");
+  const [session, setSession] = useState("");
+  const [scope, setScope] = useState("latest");
+  const [touched, setTouched] = useState(false);
+  const [data, setData] = useState(null);
+  const [diffs, setDiffs] = useState({});
+  const [open, setOpen] = useState("");
+  useEffect(() => {
+    if (resolvedRef.current) return void 0;
+    let gone = false;
+    const wanted = [sessionId, focused, runtime].filter(Boolean);
+    if (!wanted.length) return void 0;
+    (async () => {
+      let resolved = "";
+      try {
+        const response = await ctx.rest("/sessions", { timeoutMs: 8e3 });
+        const known = (response.sessions || []).map((item) => item.session);
+        resolved = wanted.find((id) => known.includes(id)) || "";
+      } catch {
+        resolved = "";
+      }
+      if (!gone && resolved) {
+        resolvedRef.current = resolved;
+        setSession(resolved);
+      }
+    })();
+    return () => {
+      gone = true;
+    };
+  }, [ctx, sessionId, focused, runtime]);
+  useEffect(() => {
+    let gone = false;
+    if (!session) return void 0;
+    const key = `${session}:${scope}`;
+    const cached = cardMemory.get(key);
+    if (cached) {
+      setData(cached.data);
+      setDiffs(cached.diffs);
+    }
+    (async () => {
+      try {
+        const response = await ctx.rest(`/changes?session=${encodeURIComponent(session)}&run=${scope}`, { timeoutMs: 8e3 });
+        if (gone) return;
+        const files2 = (response.files || []).slice(0, CARD_FILE_CAP);
+        const pairs = await Promise.all(files2.map(
+          (file) => ctx.rest(`/diff?session=${encodeURIComponent(session)}&first=${file.first_id}&last=${file.last_id}`, { timeoutMs: 8e3 }).then((entry) => [file.path, entry]).catch(() => [file.path, null])
+        ));
+        if (gone) return;
+        const nextDiffs = Object.fromEntries(pairs.filter(([, entry]) => entry));
+        cardMemory.set(key, { data: response, diffs: nextDiffs });
+        console.log("[edits-card] loaded", session, scope, files2.length);
+        setData(response);
+        setDiffs(nextDiffs);
+      } catch {
+      }
+    })();
+    return () => {
+      gone = true;
+    };
+  }, [ctx, session, scope]);
+  const files = data?.files || [];
+  if (!files.length && !touched) return null;
+  const shown = files.slice(0, CARD_FILE_CAP);
+  const totals = shown.reduce((sum, file) => {
+    const entry = diffs[file.path];
+    return { added: sum.added + (entry?.added || 0), removed: sum.removed + (entry?.removed || 0) };
+  }, { added: 0, removed: 0 });
+  return /* @__PURE__ */ jsxs("section", { className: "tec", "aria-label": "\u5DF2\u7F16\u8F91\u6587\u4EF6", children: [
+    /* @__PURE__ */ jsx("style", { children: cardCss }),
+    /* @__PURE__ */ jsxs("div", { className: "tec-head", children: [
+      /* @__PURE__ */ jsxs("span", { className: "tec-title", children: [
+        "\u5DF2\u7F16\u8F91 ",
+        files.length,
+        " \u4E2A\u6587\u4EF6"
+      ] }),
+      /* @__PURE__ */ jsxs("span", { className: "tec-counts", children: [
+        /* @__PURE__ */ jsxs("span", { className: "tec-add", children: [
+          "+",
+          totals.added
+        ] }),
+        /* @__PURE__ */ jsxs("span", { className: "tec-del", children: [
+          "\u2212",
+          totals.removed
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "tec-scope", role: "group", "aria-label": "\u8303\u56F4", children: [
+        /* @__PURE__ */ jsx("button", { "aria-pressed": scope === "all", onClick: () => {
+          setScope("all");
+          setTouched(true);
+          setOpen("");
+        }, type: "button", children: "\u672C\u4F1A\u8BDD" }),
+        /* @__PURE__ */ jsx("button", { "aria-pressed": scope === "latest", onClick: () => {
+          setScope("latest");
+          setTouched(true);
+          setOpen("");
+        }, type: "button", children: "\u6700\u8FD1\u4E00\u8F6E" })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsx("div", { className: open ? "tec-files has-open" : "tec-files", children: shown.map((file) => {
+      const entry = diffs[file.path];
+      const expanded = open === file.path;
+      return /* @__PURE__ */ jsxs("div", { className: "tec-file", children: [
+        /* @__PURE__ */ jsxs("button", { className: "tec-row", "aria-expanded": expanded, onClick: () => {
+          console.log("[edits-card] toggle", file.path, !expanded);
+          setOpen(expanded ? "" : file.path);
+        }, title: file.path, type: "button", children: [
+          /* @__PURE__ */ jsx("span", { className: `tec-status s-${file.status}`, children: cardStatus(file.status) }),
+          /* @__PURE__ */ jsx("span", { className: "tec-name", children: cardBasename(file.path) }),
+          /* @__PURE__ */ jsx("span", { className: "tec-dir", children: cardDirname(file.path) }),
+          /* @__PURE__ */ jsxs("span", { className: "tec-filecounts", children: [
+            /* @__PURE__ */ jsxs("span", { className: "tec-add", children: [
+              "+",
+              entry?.added || 0
+            ] }),
+            /* @__PURE__ */ jsxs("span", { className: "tec-del", children: [
+              "\u2212",
+              entry?.removed || 0
+            ] })
+          ] })
+        ] }),
+        expanded && /* @__PURE__ */ jsx("div", { className: "tec-diffwrap", children: !entry ? /* @__PURE__ */ jsx("div", { className: "tec-note", children: "\u8BFB\u53D6\u5DEE\u5F02\u2026" }) : !entry.patch ? /* @__PURE__ */ jsx("div", { className: "tec-note", children: entry.note || "\u6CA1\u6709\u53EF\u663E\u793A\u7684\u6587\u672C\u5DEE\u5F02\u3002" }) : /* @__PURE__ */ jsx("pre", { className: "tec-diff", tabIndex: "0", "aria-label": `${cardBasename(file.path)} \u5DEE\u5F02`, children: diffRows(entry.patch).map((row, index) => /* @__PURE__ */ jsxs("span", { className: `tec-line ${row.kind}`, children: [
+          row.kind !== "hunk" && row.kind !== "meta" && /* @__PURE__ */ jsxs(Fragment, { children: [
+            /* @__PURE__ */ jsx("span", { className: "tec-ln", children: row.before ?? "" }),
+            /* @__PURE__ */ jsx("span", { className: "tec-ln", children: row.after ?? "" })
+          ] }),
+          /* @__PURE__ */ jsx("span", { className: "tec-code", children: row.text || " " })
+        ] }, index)) }) })
+      ] }, file.path);
+    }) }),
+    !files.length && /* @__PURE__ */ jsx("div", { className: "tec-note", children: scope === "latest" ? "\u8FD9\u4E00\u8F6E\u6CA1\u6709\u8BB0\u5F55\u5230\u6587\u4EF6\u6539\u52A8\u3002" : "\u672C\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u8BB0\u5F55\u5230\u6587\u4EF6\u6539\u52A8\u3002" }),
+    files.length > CARD_FILE_CAP && /* @__PURE__ */ jsxs("div", { className: "tec-note", children: [
+      "\u4EC5\u663E\u793A\u524D ",
+      CARD_FILE_CAP,
+      " \u4E2A\u6587\u4EF6\u3002"
+    ] })
+  ] });
+}
 var plugin_default = {
   id: "hermes-session-diff",
   name: "Session changes",
   defaultEnabled: false,
   register(ctx) {
+    ctx.register({ id: "edits-card", area: TRANSCRIPT_DIRECTIVE_AREA, data: { name: "edits", render: ({ sessionId }) => /* @__PURE__ */ jsx(EditsCard, { ctx, sessionId }) } });
     ctx.register({ id: "pane", area: "panes", title: "Session changes", data: { placement: "right", width: "680px" }, render: () => /* @__PURE__ */ jsx(SessionChanges, { ctx }) });
     ctx.register({ id: "open", area: "palette", data: { id: "hermes-session-diff.open", label: "Open session changes", keywords: ["diff", "files", "changes"], run: () => {
       if (typeof host.openWorkspace === "function") host.openWorkspace("hermes-session-diff:viewer", { title: "Session changes", render: () => /* @__PURE__ */ jsx(SessionChanges, { ctx }) });
